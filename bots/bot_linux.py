@@ -20,8 +20,8 @@ COMMANDS:
 
 # ========================= CONFIGURATION =========================
 # ↓↓↓ FILL THESE IN BEFORE DEPLOYING ↓↓↓
-BOT_TOKEN  = "8225258770:AAHj-43qkE5iKXh9sH99G3gHYVkW7F2g3iM"
-CHAT_ID    = "7688146873"
+BOT_TOKEN  = ""
+CHAT_ID    = ""
 # -----------------------------------------------------------------
 # Periodic auto-extraction interval in seconds; 0 = disabled
 CHECK_INTERVAL = 0      # e.g. 3600 for hourly
