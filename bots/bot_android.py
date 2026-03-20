@@ -812,12 +812,15 @@ def chromium_master_key_android(browser_profile_path):
 
 
 def chromium_decrypt(blob, key):
-    """Decrypt a v10/v11 AES-128-CBC Chromium field (Linux/Android style)."""
+    """Decrypt v10/v11/v20 AES-128-CBC Chromium field (Linux/Android style)."""
     try:
         if not blob:
             return ''
         if not key:
             return '[decryption requires root]'
+        # v20 encryption not supported on Android (would need app_bound_encrypted_key)
+        if blob[:3] == b'v20':
+            return '[v20 encryption not supported on Android]'
         if blob[:3] in (b'v10', b'v11'):
             blob = blob[3:]
         cipher    = AES.new(key, AES.MODE_CBC, b' ' * 16)
