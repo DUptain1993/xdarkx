@@ -1,0 +1,41 @@
+Source: osripper
+Section: misc
+Priority: optional
+Maintainer: Noah Deniz Oksuz <noah.oeksuez@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ python3-all,
+ python3-setuptools,
+ python3-pytest,
+ python3-requests,
+ python3-yaml,
+ python3-psutil,
+ python3-flask,
+ python3-cryptography,
+ python3-ordered-set,
+ python3-pyinstaller,
+ python3-zstandard,
+Standards-Version: 4.6.2
+Homepage: https://github.com/NoahOksuz/OSRipper
+Vcs-Browser: https://github.com/NoahOksuz/OSRipper
+Vcs-Git: https://github.com/NoahOksuz/OSRipper.git
+Rules-Requires-Root: no
+
+Package: osripper
+Architecture: all
+Depends:
+ ${python3:Depends},
+ python3-requests,
+ python3-yaml,
+ python3-psutil,
+ python3-cryptography,
+ python3-flask,
+ python3-ordered-set,
+ python3-pyinstaller,
+ python3-zstandard,
+ ${misc:Depends},
+Description: Advanced payload generator and crypter (FUD backdoors)
+ OSRipper generates bind shells, reverse TCP payloads, and custom
+ encrypted payloads with obfuscation and evasion. For use in
+ authorized penetration testing and red team environments.

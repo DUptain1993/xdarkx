@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>OSRipper GUI</title>
+  <!-- Bootstrap 5 dark -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <!-- Bootstrap Icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+  <style>
+    /* ── Base ───────────────────────────────────── */
+    :root {
+      --gh-bg:      #0d1117;
+      --gh-surface: #161b22;
+      --gh-border:  #30363d;
+      --gh-muted:   #8b949e;
+      --gh-blue:    #58a6ff;
+      --gh-green:   #3fb950;
+      --gh-red:     #f85149;
+      --gh-yellow:  #e3b341;
+      --gh-purple:  #bc8cff;
+    }
+    body          { background: var(--gh-bg); color: #c9d1d9; font-size: 0.9rem; }
+    a             { color: var(--gh-blue); }
+
+    /* ── Header ─────────────────────────────────── */
+    .gh-header    { background: var(--gh-surface); border-bottom: 1px solid var(--gh-border); }
+    .brand-name   { font-family: monospace; font-size: 1.4rem; font-weight: 700; color: var(--gh-blue); }
+    .brand-badge  { font-size: 0.65rem; border: 1px solid var(--gh-blue); color: var(--gh-blue);
+                    background: #1f6feb22; padding: 1px 6px; border-radius: 10px; vertical-align: middle; }
+
+    /* ── Cards ──────────────────────────────────── */
+    .gh-card      { background: var(--gh-surface); border: 1px solid var(--gh-border); border-radius: 8px; }
+    .gh-card-head { background: #21262d; border-bottom: 1px solid var(--gh-border);
+                    border-radius: 8px 8px 0 0; padding: 8px 14px; }
+    .gh-label     { font-size: 0.7rem; font-weight: 700; letter-spacing: .06em;
+                    text-transform: uppercase; color: var(--gh-muted); }
+
+    /* ── Command buttons ─────────────────────────── */
+    .cmd-btn { border: 1px solid var(--gh-border); background: var(--gh-surface);
+               color: var(--gh-muted); border-radius: 6px; padding: 6px 12px;
+               font-size: 0.82rem; cursor: pointer; transition: all .18s; white-space: nowrap; }
+    .cmd-btn:hover  { border-color: var(--gh-blue); color: var(--gh-blue); }
+    .cmd-btn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+    /* ── Options toggles ─────────────────────────── */
+    .opt-grid     { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+    .opt-box      { background: #0d1117; border: 1px solid var(--gh-border); border-radius: 6px;
+                    padding: 10px 12px; cursor: pointer; transition: border-color .18s; }
+    .opt-box:hover          { border-color: var(--gh-blue); }
+    .opt-box.selected       { border-color: var(--gh-blue); background: #1f6feb11; }
+    .opt-box input[type=checkbox] { display: none; }
+    .opt-title    { font-size: 0.82rem; font-weight: 600; color: #c9d1d9; }
+    .opt-desc     { font-size: 0.7rem; color: var(--gh-muted); margin-top: 2px; }
+    .opt-icon     { font-size: 1rem; margin-bottom: 4px; }
+
+    /* ── Terminal ─────────────────────────────────── */
+    #terminal {
+      background: #010409; color: #7ee787;
+      font-family: 'Courier New', Consolas, monospace; font-size: 0.82rem;
+      height: 300px; overflow-y: auto; border: 1px solid var(--gh-border);
+      border-radius: 6px; padding: 12px; white-space: pre-wrap; word-break: break-all;
+    }
+    #terminal .t-cmd    { color: var(--gh-muted); }
+    #terminal .t-ok     { color: var(--gh-green); }
+    #terminal .t-err    { color: var(--gh-red); }
+    #terminal .t-info   { color: var(--gh-blue); }
+    #terminal .t-warn   { color: var(--gh-yellow); }
+
+    /* ── Generate button ─────────────────────────── */
+    .gen-btn {
+      background: linear-gradient(135deg, #238636, #2ea043);
+      border: none; font-size: 1rem; padding: 11px;
+      border-radius: 8px; font-weight: 700; color: #fff; transition: opacity .2s;
+    }
+    .gen-btn:hover:not(:disabled) { opacity: .88; }
+    .gen-btn:disabled { background: #21262d !important; color: var(--gh-muted); }
+    .stop-btn { background: #b91c1c; border: none; border-radius: 8px;
+                font-weight: 700; color: #fff; padding: 11px; transition: opacity .2s; }
+    .stop-btn:hover { opacity: .88; }
+
+    /* ── Files list ───────────────────────────────── */
+    .file-row { display: flex; align-items: center; justify-content: space-between;
+                padding: 8px 14px; border-bottom: 1px solid #21262d; }
+    .file-row:last-child { border-bottom: none; }
+    .file-name { font-family: monospace; font-size: 0.82rem; }
+    .file-size { font-size: 0.7rem; color: var(--gh-muted); margin-left: 6px; }
+
+    /* ── Status dot ───────────────────────────────── */
+    .sdot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+    .sdot.idle    { background: var(--gh-muted); }
+    .sdot.running { background: var(--gh-yellow); animation: blink 1s infinite; }
+    .sdot.done    { background: var(--gh-green); }
+    .sdot.error   { background: var(--gh-red); }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+    /* ── Disclaimer ───────────────────────────────── */
+    .disclaimer { background: #1c1106; border: 1px solid #9e6a03;
+                  border-radius: 6px; padding: 9px 13px; font-size: 0.78rem; color: var(--gh-yellow); }
+
+    /* ── Form controls ────────────────────────────── */
+    .form-control, .form-select {
+      background: #0d1117; border-color: var(--gh-border); color: #c9d1d9; font-size: 0.88rem;
+    }
+    .form-control:focus, .form-select:focus {
+      background: #0d1117; border-color: var(--gh-blue); color: #c9d1d9; box-shadow: 0 0 0 2px #1f6feb44;
+    }
+    .form-control::placeholder { color: var(--gh-muted); }
+    .form-label { font-size: 0.82rem; font-weight: 600; margin-bottom: 4px; }
+    .form-text  { font-size: 0.72rem; color: var(--gh-muted); }
+
+    /* ── Setup section ────────────────────────────── */
+    .setup-bar { background: #1c1106; border: 1px solid #9e6a03; border-radius: 6px;
+                 padding: 10px 14px; display: flex; align-items: center; gap: 10px;
+                 flex-wrap: wrap; }
+
+    @media (max-width: 576px) {
+      .brand-name { font-size: 1.1rem; }
+      #terminal   { height: 230px; font-size: 0.76rem; }
+      .gen-btn, .stop-btn { font-size: .88rem; padding: 10px; }
+      .opt-grid   { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+
+<body>
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <div class="gh-header px-3 py-2 mb-3">
+    <div class="d-flex align-items-center justify-content-between">
+      <div>
+        <span class="brand-name">🏴‍☠️ OSRipper</span>
+        <span class="brand-badge ms-2">v0.4.2</span>
+        <div style="font-size:.75rem; color:var(--gh-muted)">Advanced Payload Generator &amp; Crypter</div>
+      </div>
+      <div class="text-end">
+        <span class="sdot idle" id="sdot"></span>
+        <small id="statusLabel" class="text-muted">Idle</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="container-fluid px-3" style="max-width:860px;">
+
+    <!-- Disclaimer -->
+    <div class="disclaimer mb-3">
+      <i class="bi bi-shield-exclamation me-1"></i>
+      <strong>Legal:</strong> Authorized penetration testing and security research only. Misuse is illegal.
+    </div>
+
+    <!-- ── Command Selector ────────────────────────────────────────────────── -->
+    <div class="gh-card mb-3">
+      <div class="gh-card-head">
+        <span class="gh-label"><i class="bi bi-terminal me-1"></i>Command</span>
+      </div>
+      <div class="p-3">
+        <div class="d-flex flex-wrap gap-2" id="cmdButtons">
+          <button class="cmd-btn active" data-cmd="bind">
+            <i class="bi bi-plug-fill me-1"></i>Bind Shell
+          </button>
+          <button class="cmd-btn" data-cmd="reverse">
+            <i class="bi bi-arrow-return-left me-1"></i>Reverse Shell
+          </button>
+          <button class="cmd-btn" data-cmd="staged">
+            <i class="bi bi-layers-fill me-1"></i>Staged
+          </button>
+          <button class="cmd-btn" data-cmd="doh">
+            <i class="bi bi-globe2 me-1"></i>DoH C2
+          </button>
+          <button class="cmd-btn" data-cmd="custom">
+            <i class="bi bi-file-earmark-code-fill me-1"></i>Custom Crypter
+          </button>
+          <button class="cmd-btn" data-cmd="server">
+            <i class="bi bi-hdd-network-fill me-1"></i>C2 Server
+          </button>
+        </div>
+        <div class="mt-2" style="font-size:.78rem; color:var(--gh-muted);" id="cmdDesc">
+          Opens a port on the victim machine and waits for an incoming connection.
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Parameters ──────────────────────────────────────────────────────── -->
+    <div class="gh-card mb-3">
+      <div class="gh-card-head">
+        <span class="gh-label"><i class="bi bi-sliders me-1"></i>Parameters</span>
+      </div>
+      <div class="p-3" id="paramsPanel">
+        <!-- populated by JS -->
+      </div>
+    </div>
+
+    <!-- ── Payload Options ─────────────────────────────────────────────────── -->
+    <div class="gh-card mb-3" id="optCard">
+      <div class="gh-card-head">
+        <span class="gh-label"><i class="bi bi-toggles me-1"></i>Payload Options</span>
+      </div>
+      <div class="p-3">
+        <div class="opt-grid" id="optGrid">
+
+          <label class="opt-box" id="box-obfuscate">
+            <input type="checkbox" id="optObfuscate" checked>
+            <div class="opt-icon">🔀</div>
+            <div class="opt-title">Obfuscate</div>
+            <div class="opt-desc">Multi-layer encoding</div>
+          </label>
+
+          <label class="opt-box" id="box-enhanced">
+            <input type="checkbox" id="optEnhanced">
+            <div class="opt-icon">🛡️</div>
+            <div class="opt-title">Enhanced</div>
+            <div class="opt-desc">Anti-debug + VM detect</div>
+          </label>
+
+          <label class="opt-box" id="box-compile">
+            <input type="checkbox" id="optCompile">
+            <div class="opt-icon">⚙️</div>
+            <div class="opt-title">Compile</div>
+            <div class="opt-desc">Standalone binary</div>
+          </label>
+
+          <label class="opt-box" id="box-delay">
+            <input type="checkbox" id="optDelay">
+            <div class="opt-icon">⏳</div>
+            <div class="opt-title">Stealth Delay</div>
+            <div class="opt-desc">5–15 s startup delay</div>
+          </label>
+
+          <label class="opt-box" id="box-norandom">
+            <input type="checkbox" id="optNoRandomize">
+            <div class="opt-icon">📌</div>
+            <div class="opt-title">Fixed Name</div>
+            <div class="opt-desc">No random suffix</div>
+          </label>
+
+        </div>
+
+        <!-- Output Name -->
+        <div class="mt-3">
+          <label class="form-label" for="optOutput">
+            <i class="bi bi-file-earmark-text me-1"></i>Output Name
+          </label>
+          <input type="text" class="form-control" id="optOutput" value="payload" placeholder="payload" maxlength="64">
+          <div class="form-text">Base filename for generated files (no extension)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Generate / Stop ─────────────────────────────────────────────────── -->
+    <div class="mb-3 d-flex gap-2">
+      <button class="gen-btn flex-grow-1 w-100" id="generateBtn">
+        <i class="bi bi-play-fill me-2"></i><span id="generateLabel">Generate Bind Shell</span>
+      </button>
+      <button class="stop-btn d-none px-3" id="stopBtn" title="Kill running job">
+        <i class="bi bi-stop-fill"></i>
+      </button>
+    </div>
+
+    <!-- ── Setup bar ───────────────────────────────────────────────────────── -->
+    <div class="setup-bar mb-3">
+      <div style="flex:1; min-width:160px;">
+        <div style="font-size:.8rem; font-weight:600; color:var(--gh-yellow);">
+          <i class="bi bi-download me-1"></i>First-time Setup
+        </div>
+        <div style="font-size:.72rem; color:var(--gh-muted);">Install optional deps (ngrok, Nuitka, sandboxed)</div>
+      </div>
+      <div class="form-check form-switch mb-0 me-2">
+        <input class="form-check-input" type="checkbox" id="setupSystem">
+        <label class="form-check-label" for="setupSystem" style="font-size:.78rem">System-wide</label>
+      </div>
+      <button class="btn btn-sm btn-warning fw-bold" id="setupBtn">
+        <i class="bi bi-gear-fill me-1"></i>Run Setup
+      </button>
+    </div>
+
+    <!-- ── Terminal Output ─────────────────────────────────────────────────── -->
+    <div class="gh-card mb-3">
+      <div class="gh-card-head d-flex align-items-center justify-content-between">
+        <span class="gh-label">
+          <span class="sdot idle" id="termDot"></span>
+          <span id="termLabel">Output</span>
+        </span>
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2" id="copyBtn" title="Copy output">
+            <i class="bi bi-clipboard"></i>
+          </button>
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2" id="clearBtn" title="Clear terminal">
+            <i class="bi bi-trash3"></i>
+          </button>
+        </div>
+      </div>
+      <div id="terminal">$ OSRipper GUI ready. Select a command above and press Generate.
+</div>
+    </div>
+
+    <!-- ── Result Files ─────────────────────────────────────────────────────── -->
+    <div class="gh-card mb-5">
+      <div class="gh-card-head d-flex align-items-center justify-content-between">
+        <span class="gh-label"><i class="bi bi-folder2-open me-1"></i>Result Files</span>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2" id="refreshBtn" title="Refresh">
+          <i class="bi bi-arrow-clockwise"></i>
+        </button>
+      </div>
+      <div id="filesList">
+        <div class="text-center text-muted py-3" style="font-size:.82rem;">
+          <i class="bi bi-inbox me-1"></i>No files yet
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /container -->
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

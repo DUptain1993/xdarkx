@@ -1,0 +1,20 @@
+osripper (0.4.2) UNRELEASED; urgency=medium
+
+  * Bump version to 0.4.2
+  * Obfuscation: randomized decoder signatures and output filenames for AV evasion
+  * Default random obfuscated filename when using --obfuscate/--enhanced
+  * Remove debug payload leak from enhanced obfuscator
+
+ -- Noah Deniz Oksuz <noah.oeksuez@gmail.com>  Fri, 20 Feb 2026 12:00:00 +0000
+
+osripper (0.4.1-1) UNRELEASED; urgency=medium
+
+  * Bump version to 0.4.1
+  * Initial Debian package for ParrotOS (Closes: #42)
+  * Add optional-deps handling: prompt for pip install (pyngrok, nuitka, sandboxed)
+    when features are used without them
+  * Add osripper-cli setup command to install optional dependencies
+  * Skip compilation tests when nuitka/sandboxed not installed
+  * Fix validate_args for setup command (hasattr check for icon)
+
+ -- Noah Deniz Oksuz <noah.oeksuez@gmail.com>  Fri, 20 Feb 2026 12:00:00 +0000

