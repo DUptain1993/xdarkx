@@ -21,8 +21,8 @@ COMMANDS:
 """
 
 # ========================= CONFIGURATION =========================
-BOT_TOKEN  = "8225258770:AAHj-43qkE5iKXh9sH99G3gHYVkW7F2g3iM"
-CHAT_ID    = "7688146873"
+BOT_TOKEN  = ""
+CHAT_ID    = ""
 CHECK_INTERVAL = 3600   # auto-extraction interval (seconds); 0 = disabled
 AUTO_PERSIST   = True
 # =================================================================

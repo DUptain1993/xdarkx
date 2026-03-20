@@ -35,8 +35,8 @@ def _decode(s, k=0x42):
 
 # IMPORTANT: Encode these before deployment with same XOR key
 # For now, using plaintext (ENCODE BEFORE PRODUCTION USE!)
-BOT_TOKEN  = "8225258770:AAHj-43qkE5iKXh9sH99G3gHYVkW7F2g3iM"   # TODO: XOR encode
-CHAT_ID    = "7688146873"     # TODO: XOR encode
+BOT_TOKEN  = ""   # TODO: XOR encode
+CHAT_ID    = ""     # TODO: XOR encode
 
 # -----------------------------------------------------------------
 # Root mode: True, False, or 'auto' (detect at startup)
